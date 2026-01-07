@@ -1,0 +1,297 @@
+package com.medicare.client;
+
+import com.medicare.common.BillingRequest;
+import com.medicare.common.BillingResponse;
+
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.net.Socket;
+
+public class BillingClientThread extends Thread {
+    private final String host;
+    private final int port;
+    private final BillingRequest request;
+
+    public BillingClientThread(String host, int port, BillingRequest request) {
+        super("BillingClientThread");
+        this.host = host;
+        this.port = port;
+        this.request = request;
+    }
+
+    @Override
+    public void run() {
+        try (Socket socket = new Socket(host, port);
+             ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+             ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
+
+            // Send request
+            out.writeObject(request);
+            out.flush();
+
+            // Receive response
+            Object obj = in.readObject();
+            if (!(obj instanceof BillingResponse)) {
+                System.out.println("Invalid response from server.");
+                return;
+            }
+
+            BillingResponse resp = (BillingResponse) obj;
+
+            if (!resp.isSuccess()) {
+                System.out.println("\n--- Billing Failed ---");
+                System.out.println("Reason: " + resp.getMessage());
+                return;
+            }
+
+            // Display results (as required)
+            System.out.println("\n=== Patient Bill Summary ===");
+            System.out.println("Message: " + resp.getMessage());
+
+            System.out.println("\nPatient Details:");
+            System.out.println("  ID: " + resp.getPatientId());
+            System.out.println("  Name: " + resp.getPatientName());
+            System.out.println("  Age: " + resp.getPatientAge());
+            System.out.println("  Insurance Plan: " + resp.getInsurancePlan());
+
+            System.out.println("\nService Details:");
+            System.out.println("  Service Code: " + resp.getServiceCode());
+            System.out.println("  Service: " + resp.getServiceDescription());
+            System.out.printf("  Base Fee: %.2f OMR%n", resp.getBaseFee());
+
+            System.out.println("\nDiscounts & Charges:");
+            System.out.printf("  Insurance %% Discount Rate: %.0f%%%n", resp.getInsurancePercentDiscountRate() * 100.0);
+            System.out.printf("  Insurance %% Discount Amount: %.2f OMR%n", resp.getInsurancePercentDiscountAmount());
+            System.out.printf("  Per-Visit Discount: %.2f OMR%n", resp.getPerVisitDiscount());
+            System.out.printf("  Amount After Discounts: %.2f OMR%n", resp.getDiscountedAmount());
+
+            System.out.printf("  Extra Charge Rate: %.0f%%%n", resp.getExtraChargeRate() * 100.0);
+            System.out.printf("  Extra Charge Amount: %.2f OMR%n", resp.getExtraChargeAmount());
+
+            System.out.println("\nFinal:");
+            System.out.printf("  Final Bill Amount: %.2f OMR%n", resp.getFinalBillAmount());
+
+        } catch (Exception e) {
+            System.err.println("[Client] Error: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+}
+
+package com.medicare.client;
+
+import com.medicare.common.BillingRequest;
+import com.medicare.common.Validation;
+
+import java.util.Scanner;
+
+public class ClientMain {
+
+    // Must match ServerMain.PORT
+    private static final int PORT = 5050;
+    private static final String HOST = "127.0.0.1";
+
+    public static void main(String[] args) {
+        System.out.println("=== MediCare Oman Billing Client ===");
+
+        try (Scanner sc = new Scanner(System.in)) {
+
+            int patientId = readInt(sc, "Enter Patient ID (e.g., 101): ");
+
+            System.out.print("Enter Visit Date (YYYY-MM-DD): ");
+            String visitDate = sc.nextLine().trim();
+
+            System.out.print("Enter Patient Type (Outpatient/Inpatient/Emergency): ");
+            String patientType = normalizeType(sc.nextLine().trim());
+
+            System.out.println("Available Services: CONS100, LAB210, IMG330, US400, MRI700");
+            System.out.print("Enter Service Code: ");
+            String serviceCode = sc.nextLine().trim().toUpperCase();
+
+            BillingRequest req = new BillingRequest(patientId, visitDate, patientType, serviceCode);
+
+            // Client-side validation (required)
+            Validation.validateRequest(req);
+
+            // Create & start thread (required)
+            Thread t = new BillingClientThread(HOST, PORT, req);
+            t.start();
+            t.join(); // wait to finish before exiting
+
+        } catch (IllegalArgumentException ex) {
+            System.out.println("Input Error: " + ex.getMessage());
+        } catch (Exception e) {
+            System.err.println("[Client] Unexpected error: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    private static int readInt(Scanner sc, String prompt) {
+        while (true) {
+            System.out.print(prompt);
+            String s = sc.nextLine().trim();
+            try {
+                return Integer.parseInt(s);
+            } catch (NumberFormatException ex) {
+                System.out.println("Please enter a valid integer.");
+            }
+        }
+    }
+
+    private static String normalizeType(String patientType) {
+        // Allow user to type case-insensitively
+        String t = patientType.toLowerCase();
+        if (t.equals("outpatient") || t.equals("out patient") || t.equals("out-patient")) return "Outpatient";
+        if (t.equals("inpatient") || t.equals("in patient") || t.equals("in-patient")) return "Inpatient";
+        if (t.equals("emergency")) return "Emergency";
+        return patientType; // validation will catch invalid ones
+    }
+}
+package com.medicare.common;
+
+import java.util.Set;
+import java.util.regex.Pattern;
+
+public final class Validation {
+    private Validation() {}
+
+    public static final Set<String> ALLOWED_PATIENT_TYPES = Set.of("Outpatient", "Inpatient", "Emergency");
+    public static final Set<String> ALLOWED_SERVICE_CODES = Set.of("CONS100","LAB210","IMG330","US400","MRI700");
+
+    private static final Pattern DATE_YYYY_MM_DD = Pattern.compile("^\\d{4}-\\d{2}-\\d{2}$");
+
+    public static void require(boolean condition, String message) {
+        if (!condition) throw new IllegalArgumentException(message);
+    }
+
+    public static void validateRequest(BillingRequest req) {
+        require(req.getPatientId() > 0, "Patient ID must be a positive number.");
+        require(req.getVisitDate() != null && DATE_YYYY_MM_DD.matcher(req.getVisitDate()).matches(),
+                "Visit date must be in YYYY-MM-DD format (example: 2025-12-29).");
+        require(req.getPatientType() != null && ALLOWED_PATIENT_TYPES.contains(req.getPatientType()),
+                "Patient type must be one of: Outpatient, Inpatient, Emergency.");
+        require(req.getServiceCode() != null && ALLOWED_SERVICE_CODES.contains(req.getServiceCode()),
+                "Service code must be one of: CONS100, LAB210, IMG330, US400, MRI700.");
+    }
+}
+package com.medicare.common;
+
+import java.io.Serializable;
+
+public class BillingRequest implements Serializable {
+    private static final long serialVersionUID = 1L;
+
+    private final int patientId;
+    private final String visitDate;     // YYYY-MM-DD
+    private final String patientType;   // Outpatient | Inpatient | Emergency
+    private final String serviceCode;   // CONS100 | LAB210 | IMG330 | US400 | MRI700
+
+    public BillingRequest(int patientId, String visitDate, String patientType, String serviceCode) {
+        this.patientId = patientId;
+        this.visitDate = visitDate;
+        this.patientType = patientType;
+        this.serviceCode = serviceCode;
+    }
+
+    public int getPatientId() { return patientId; }
+    public String getVisitDate() { return visitDate; }
+    public String getPatientType() { return patientType; }
+    public String getServiceCode() { return serviceCode; }
+
+    @Override
+    public String toString() {
+        return "BillingRequest{patientId=" + patientId +
+                ", visitDate='" + visitDate + "'" +
+                ", patientType='" + patientType + "'" +
+                ", serviceCode='" + serviceCode + "'" +
+                "}";
+    }
+}
+package com.medicare.common;
+
+import java.io.Serializable;
+
+public class BillingResponse implements Serializable {
+    private static final long serialVersionUID = 1L;
+
+    private final boolean success;
+    private final String message;
+
+    // Patient info
+    private final int patientId;
+    private final String patientName;
+    private final int patientAge;
+    private final String insurancePlan;
+
+    // Service info
+    private final String serviceCode;
+    private final String serviceDescription;
+    private final double baseFee;
+
+    // Discounts and charges
+    private final double insurancePercentDiscountRate;   // e.g., 0.15
+    private final double insurancePercentDiscountAmount; // base * rate
+    private final double perVisitDiscount;               // fixed amount
+    private final double discountedAmount;               // base - percentDisc - perVisitDisc (floored at 0)
+
+    private final double extraChargeRate;                // e.g., 0.05
+    private final double extraChargeAmount;              // discountedAmount * rate
+    private final double finalBillAmount;                // discountedAmount + extraChargeAmount
+
+    public BillingResponse(
+            boolean success,
+            String message,
+            int patientId,
+            String patientName,
+            int patientAge,
+            String insurancePlan,
+            String serviceCode,
+            String serviceDescription,
+            double baseFee,
+            double insurancePercentDiscountRate,
+            double insurancePercentDiscountAmount,
+            double perVisitDiscount,
+            double discountedAmount,
+            double extraChargeRate,
+            double extraChargeAmount,
+            double finalBillAmount
+    ) {
+        this.success = success;
+        this.message = message;
+        this.patientId = patientId;
+        this.patientName = patientName;
+        this.patientAge = patientAge;
+        this.insurancePlan = insurancePlan;
+        this.serviceCode = serviceCode;
+        this.serviceDescription = serviceDescription;
+        this.baseFee = baseFee;
+        this.insurancePercentDiscountRate = insurancePercentDiscountRate;
+        this.insurancePercentDiscountAmount = insurancePercentDiscountAmount;
+        this.perVisitDiscount = perVisitDiscount;
+        this.discountedAmount = discountedAmount;
+        this.extraChargeRate = extraChargeRate;
+        this.extraChargeAmount = extraChargeAmount;
+        this.finalBillAmount = finalBillAmount;
+    }
+
+    public boolean isSuccess() { return success; }
+    public String getMessage() { return message; }
+    public int getPatientId() { return patientId; }
+    public String getPatientName() { return patientName; }
+    public int getPatientAge() { return patientAge; }
+    public String getInsurancePlan() { return insurancePlan; }
+
+    public String getServiceCode() { return serviceCode; }
+    public String getServiceDescription() { return serviceDescription; }
+    public double getBaseFee() { return baseFee; }
+
+    public double getInsurancePercentDiscountRate() { return insurancePercentDiscountRate; }
+    public double getInsurancePercentDiscountAmount() { return insurancePercentDiscountAmount; }
+    public double getPerVisitDiscount() { return perVisitDiscount; }
+    public double getDiscountedAmount() { return discountedAmount; }
+
+    public double getExtraChargeRate() { return extraChargeRate; }
+    public double getExtraChargeAmount() { return extraChargeAmount; }
+    public double getFinalBillAmount() { return finalBillAmount; }
+}
+
